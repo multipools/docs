@@ -1,44 +1,56 @@
 # Smart Contracts
 
-All contracts are written in Solidity 0.8.26 with `viaIR`, optimizer 200 runs, EVM target Cancun.
+Reference for every contract in the MultiPools protocol.
 
 ---
 
 ## MultiPoolsLaunchpadFactory
 
-The main entry point for the protocol. Deployed as a UUPS upgradeable proxy.
+**Address:** `0x61A4e6e6ceCfc04f44719C15F88D1d3Eea270000` (all chains, UUPS proxy)
+
+Entry point for the launch flow. Accepts `launch()` calls, orchestrates token deploy, hook deploy, pool initialization, LP seeding, and cross-chain LZ message. Upgradeable via UUPS pattern with keeper as upgrade authority.
 
 Key functions:
 
-* `launch(name, symbol, graffiti, hookSalt, tokenSalt, sqrtPriceX96, tickLower, tickUpper)` — deploys a token, hook, and pool on the source chain, then sends LayerZero messages to remote chains
-* `configureTokenDvn(token)` — configures LayerZero ULN settings for a token's DVN
-* `setKeeper(keeper)` — sets the authorized keeper address
-* `setAdapter(adapter)` — sets the LZ adapter address
-* `setSwapHelper(swapHelper)` — sets the swap helper address
-* `setTokenContractURI(token, uri)` — sets ERC-7572 contract metadata URI
-
-The factory holds no funds. All fees flow directly to `MultiPoolsFeeVault`.
+| Function | Description |
+|---|---|
+| `launch(params)` | Deploy token, init pool, seed LP, send LZ message to remote chains |
+| `configureTokenDvn(token)` | Set DVN ULN config for a given token (called by keeper post-launch) |
+| `setTokenContractURI(token, uri)` | Set ERC-7572 metadata URI on a deployed token |
+| `lockHook(token)` | Lock the hook permanently (called after antisnipe window expires) |
+| `renounceTokenOwnership(token)` | Renounce ownership of the token contract |
 
 ---
 
 ## MultiPoolsToken
 
-ERC-20 token with LayerZero OFT support for native cross-chain transfers.
+ERC-20 token deployed via CREATE2. Each token launched through the factory is an instance of this contract. Implements LayerZero OFT for native cross-chain transfers without wrapping.
 
-* Constructor takes only `(name, symbol, graffiti, creator)` so the CREATE2 initcode hash is chain-independent
-* `initialize(supply, warpRoute)` injects supply and bridge address post-deploy
-* `crosschainMint(to, amount)` is callable only by the trusted bridge on the source chain during remote pool seeding
-* Implements ERC-7572 `contractURI()` returning metadata registered via the factory
+Key properties:
+
+| Property | Value |
+|---|---|
+| Total supply | 69,000,000,000 (69 billion) |
+| Standard | ERC-20 plus LayerZero OFT |
+| Max wallet | 2% of supply for the first 60 seconds after launch |
+| Metadata | ERC-7572 `contractURI()` |
+
+The same CREATE2 salt produces the same token address on all three chains. The salt is `keccak256(abi.encode(creator, name, symbol, nonce))` where nonce is mined off-chain to produce an address with no conflicting hook bits.
 
 ---
 
 ## MultiPoolsHook
 
-Uniswap v4 hook implementing permission bits `0x0ACC` (afterSwap, beforeInitialize, afterInitialize, afterAddLiquidity).
+Uniswap v4 hook with permission flags `0x0ACC` (afterSwap, afterAddLiquidity, afterRemoveLiquidity).
 
-* Charges a fixed 1% fee on every swap, routed to `MultiPoolsFeeVault`
-* LP positions added by the seeder are locked forever via a mapping in `afterAddLiquidity`
-* `hookSalt` must be mined off-chain so the deployed hook address has the correct lower bits
+Key behaviors:
+
+- Charges 1% fee on every swap, accrued to `MultiPoolsFeeVault`
+- Blocks LP withdrawal by reverting in `afterRemoveLiquidity` for non-authorized callers
+- Tracks per-pool fee accumulation for creator and platform splits
+- Sets `lockForever` flag after antisnipe window to signal that the hook is permanently active
+
+Hook address is deterministic via CREATE2. The salt must be mined off-chain so the hook address has the correct Uniswap v4 permission bits. The init hash is factory-specific and chain-specific.
 
 ---
 
@@ -46,111 +58,109 @@ Uniswap v4 hook implementing permission bits `0x0ACC` (afterSwap, beforeInitiali
 
 Accumulates swap fees per token per creator.
 
-* `accrue(token, creator, amount)` — called by the hook after every swap
-* `claimCreator(token)` — transfers 70% of accumulated fees to the creator
-* `claimPlatform(token[])` — transfers 30% of accumulated fees to the platform wallet
+Fee split:
 
-Fees accumulate in ETH (the swap fee token is always the native token on the chain).
+| Share | Amount | Recipient |
+|---|---|---|
+| Creator | 70% | Directly claimable by creator wallet |
+| Platform | 30% | Routed to BuybackBurner and RewardsDistributor |
+
+Functions:
+
+| Function | Description |
+|---|---|
+| `claimCreator(token)` | Creator claims their accumulated ETH fees |
+| `claimPlatform(token)` | Platform claims its accumulated ETH fees |
 
 ---
 
 ## MultiPoolsLZAdapter
 
-OApp adapter implementing the LayerZero V2 messaging interface.
+OFTAdapter that sends cross-chain OApp messages. Called by the factory on launch to notify remote chains.
 
-* `send(dstEid, payload, options)` — encodes and sends a cross-chain message
-* `_lzReceive(origin, guid, payload, executor, extraData)` — receives a message and triggers remote token deploy via the factory
+Message payload includes: `tokenSalt`, `hookSalt`, `creator`, `sqrtPriceX96`, `tickLower`, `tickUpper`.
+
+Uses LayerZero V2 `endpoint.send()` with the factory as the OApp owner. Peers are set to the adapter address on each remote chain.
 
 ---
 
 ## MultiPoolsDVN
 
-Custom DVN that verifies LayerZero packets for MultiPools routes.
+Custom DVN. Verifies and commits LZ packets on the destination chain.
 
-* Six route wallets, each authorized for one directional route
-* `verifyAndCommit(srcEid, dstEid, packet, confirmation, nonce)` — signs, verifies, and commits in one atomic transaction
-* Uses EIP-191 `signMessage(bytes)` for signatures
-* Calls `ReceiveUln302.verify()` then `ReceiveUln302.commitVerification()` on the destination chain
+Architecture:
 
----
+- Six isolated route wallets (one per directional route)
+- Each wallet is `isValidSigner` on the DVN for its destination chain
+- `verifyAndCommit()` calls `ReceiveUln302.verify()` then `commitVerification()` atomically
+- Registered in ULN config via `DvnConfigurator` per token
 
-## DvnConfigurator
-
-Configures LayerZero ULN DVN settings per token on all three chains.
-
-* `configure(token)` — sets the required DVN list in `SendUln302` and `ReceiveUln302` for a token's OApp
-* Called by the keeper after each successful launch
+**Address:** `0x829310352947Cc868c910DD133038Bd837EF0000` (all chains)
 
 ---
 
 ## MultiPoolsExecutor
 
-Executes LayerZero packets on the destination chain when automatic execution fails.
+Calls `lzReceive()` on destination chains after DVN verification is committed. Polls `inboundPayloadHash()` to detect when the packet is ready, then executes.
 
-* `execute(origin, message)` — calls `lzReceive()` on the destination token contract
-* Used as the fallback executor when the standard LZ executor does not trigger
+**Address:** `0x8673aFB1196d09F09957F25BFBC939152b4E0000` (all chains)
 
 ---
 
 ## MultiPoolsLiquiditySeeder
 
-Seeds the initial token-only LP position via Uniswap v4 `unlock()`.
-
-* Seeds a position entirely above `tickUpper` so no ETH is required
-* The hook locks this position permanently in `afterAddLiquidity`
+Seeds token-only LP positions into Uniswap v4 pools via `PoolManager.modifyLiquidity()`. Positions are placed above `tickUpper` so they require only tokens (no ETH). The hook prevents these positions from being withdrawn.
 
 ---
 
 ## AutoLPSeeder
 
-Automated seeding bot called by the keeper after a remote token is deployed.
-
-* `triggerAutoLP(token, poolId, currentTick)` — seeds LP if not yet seeded
-* Reads `hook.lpSeeded(poolId)` to check seeding status
+Accumulates platform fee ETH then auto-compounds it back into LP positions. Called by the keeper periodically.
 
 ---
 
 ## BuybackBurner
 
-Uses the platform fee share to buy back and burn the launched token.
-
-* `buyback(token, minAmountOut)` — swaps ETH for tokens via `SwapHelper`, then burns them
-* Callable only by the platform wallet
+Receives platform fee ETH, uses it to buy the launched token via Uniswap v4, then burns the purchased tokens. Reduces circulating supply over time.
 
 ---
 
 ## RewardsDistributor
 
-Distributes platform fee rewards proportionally to token stakers.
-
-* `distribute(token, amount)` — allocates rewards to stakers
-* `claim(token)` — transfers accumulated rewards to the caller
+Distributes token rewards from platform fees to LP holders. Tracks LP share proportionally.
 
 ---
 
 ## SwapHelper
 
-Executes exact-input swaps via the Uniswap v4 Universal Router.
-
-* Uses negative `amountSpecified` (exact input semantics)
-* Applies a configurable slippage tolerance (default 5%)
-
----
-
-## MultiPoolsTokenLocker
-
-Time-locks tokens on behalf of a user with a configurable release timestamp.
-
-* `lock(token, amount, releaseAt)` — transfers and locks tokens
-* `unlock(token)` — releases tokens after the lock expires
+Executes exact-input swaps against Uniswap v4 via `PoolManager.unlock()` / `unlockCallback`. Used internally by BuybackBurner and by the frontend for price quotes.
 
 ---
 
 ## ArbVault
 
-Profit-sharing vault for arbitrage proceeds.
+Profit-sharing vault for arbitrage operations. Accepts ETH deposits, tracks shares, and adds profit via `addProfit()` (owner only). Charges a 0.1% withdrawal fee.
 
-* `deposit()` — add ETH to the vault
-* `addProfit(amount)` — record profit (onlyOwner)
-* `withdraw(amount)` — withdraw principal plus proportional profit share
-* 0.1% withdrawal fee
+---
+
+## MultiPoolsKeeperProxy
+
+Keeper-owned proxy for permissioned protocol operations like `setPeer()` on LZ adapter, `configureTokenDvn()`, and factory upgrades. Allows the keeper wallet to act on behalf of the protocol owner for specific functions.
+
+---
+
+## MultiPoolsTokenLocker
+
+Locks token positions for a configurable period. Used during the antisnipe window to prevent early LP withdrawal.
+
+---
+
+## DvnConfigLib
+
+Library encoding `UlnConfig` structs for `IMessageLibManager.setConfig()`. The struct must be ABI-encoded as a full struct with a leading 32-byte offset, not field-by-field.
+
+---
+
+## DvnConfigurator
+
+Sets DVN ULN config per token on all three chains so `MultiPoolsDVN` is recognized as the required verifier by the LZ receive library. Called by the keeper after each token launch.

@@ -1,176 +1,167 @@
 # API Integration
 
-The MultiPools API server exposes a REST API for querying token data, bridge history, price feeds, and arbitrage state.
+The MultiPools REST API provides read access to token data, bridge status, fee vault state, and arbitrage history. All endpoints return JSON.
 
 Base URL: `https://multipools.trade/api`
 
 ---
 
-## Endpoints
+## Tokens
 
-### Tokens
-
-#### List All Tokens
+### List Tokens
 
 ```
-GET /api/tokens
+GET /api/tokens?page=1&limit=20
 ```
 
-Returns all launched tokens with market data.
+Query parameters:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `page` | integer | Page number, starting from 1 |
+| `limit` | integer | Results per page, max 100 |
+| `creator` | address | Filter by creator wallet |
+| `search` | string | Search by name or symbol |
 
 Response:
 
 ```json
-[
-  {
-    "id": "uuid",
-    "tokenAddress": "0x...",
-    "name": "My Token",
-    "symbol": "MYT",
-    "creatorAddress": "0x...",
-    "chainId": 1,
-    "hookAddress": "0x...",
-    "launchedAt": "2026-08-13T00:00:00Z",
-    "priceUsd": "0.0001",
-    "volume24h": "50000",
-    "marketCap": "6900000"
-  }
-]
+{
+  "tokens": [
+    {
+      "id": "...",
+      "name": "My Token",
+      "symbol": "MTK",
+      "tokenAddress": "0x...",
+      "creatorAddress": "0x...",
+      "status": "live",
+      "createdAt": "2026-08-01T00:00:00.000Z",
+      "marketCap": "125000.00",
+      "volume24h": "8400.00",
+      "priceUsd": "0.000181"
+    }
+  ],
+  "total": 61,
+  "page": 1,
+  "limit": 20
+}
 ```
 
-#### Get Token by Address
+### Get Token
 
 ```
 GET /api/tokens/:address
 ```
 
-Returns full token details including pool configuration and fee stats.
+Returns full token data including hook address, pool ID, and vault balances.
 
-#### Get Token Trades
-
-```
-GET /api/tokens/:address/trades
-```
-
-Returns recent swap events for a token.
-
-#### Get Token Holders
-
-```
-GET /api/tokens/:address/holders
-```
-
-Returns current holder list and balances.
-
-#### Get On-Chain Price
-
-```
-GET /api/tokens/:address/price
-```
-
-Returns the current price from Uniswap v4 via `extsload` on the PoolManager slot.
-
-#### Get Contract Metadata (ERC-7572)
+### Get Token Metadata (ERC-7572)
 
 ```
 GET /api/tokens/:address/metadata
 ```
 
-Returns ERC-7572 compliant contract metadata for the token.
+Returns ERC-7572-compatible JSON metadata for the token contract.
 
 ---
 
-### Bridge
+## Bridge
 
-#### List Bridge Transactions
+### Track Bridge Transfer
 
 ```
-GET /api/bridge
+POST /api/bridge/track
 ```
 
-Returns recent cross-chain bridge deliveries with status.
+Register a bridge transfer for status tracking. The keeper calls this automatically when it detects a `PacketSent` event.
 
-Response:
+### Get Bridge Status
+
+```
+GET /api/bridge/status?srcTxHash=0x...
+```
+
+Returns the current status of a bridge transfer.
+
+| Status | Description |
+|---|---|
+| `pending` | DVN has not yet verified the packet |
+| `delivered` | lzReceive() executed successfully on destination |
+| `failed` | Delivery failed after retries |
+
+---
+
+## Fee Vault
+
+### Get Vault Balances
+
+```
+GET /api/vault/balances?tokenAddress=0x...
+```
+
+Returns claimable creator and platform fee balances for a given token.
 
 ```json
-[
-  {
-    "id": "uuid",
-    "tokenAddress": "0x...",
-    "srcChainId": 1,
-    "dstChainId": 8453,
-    "txHash": "0x...",
-    "status": "delivered",
-    "createdAt": "2026-08-13T00:00:00Z"
-  }
-]
-```
-
----
-
-### Pre-Seed
-
-#### Submit Pre-Seed Request
-
-```
-POST /api/preseed
-Content-Type: application/json
-
 {
   "tokenAddress": "0x...",
-  "chainId": 1,
-  "creator": "0x..."
+  "creatorClaimable": "0.042",
+  "platformClaimable": "0.018",
+  "totalVolumeEth": "4.2"
 }
 ```
 
-Signals the keeper to prepare LP seeding parameters for an upcoming launch.
+---
+
+## Statistics
+
+### Protocol Stats
+
+```
+GET /api/stats
+```
+
+```json
+{
+  "totalTokens": 61,
+  "totalVolumeEth": "892.4",
+  "totalFeeEth": "8.924"
+}
+```
 
 ---
 
-### Arbitrage
+## Arbitrage
 
-#### Get Price Feed
+### Get Current Prices
 
 ```
 GET /api/arb/prices
 ```
 
-Returns current token prices across all three chains.
+Returns current token prices on each chain for arbitrage detection.
 
-#### Get Arbitrage History
+### Get Arbitrage History
 
 ```
 GET /api/arb/history
 ```
 
-Returns recent arbitrage executions with profit data.
+Returns recent arbitrage executions with chain, token, and profit data.
 
 ---
 
-### Locks
+## Locks
 
-#### Get Token Locks
+### Get Token Locks
 
 ```
 GET /api/locks?tokenAddress=0x...
 ```
 
-Returns active token lock records.
+Returns active LP lock records for a token.
 
 ---
 
 ## Authentication
 
-The API is public for read operations. Write operations (pre-seed, admin) require a session token obtained via the platform authentication flow.
-
----
-
-## TypeScript SDK
-
-Instead of calling the REST API directly, use the TypeScript SDK for typed access with React Query integration:
-
-```bash
-pnpm add @multipools/api-client
-```
-
-See the [SDK documentation](sdk.md) for usage examples.
+All read endpoints are public. Write endpoints (bridge tracking, keeper operations) require a keeper API secret passed via the `X-Keeper-Secret` header.
