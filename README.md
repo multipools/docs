@@ -41,7 +41,7 @@ Key properties:
 | Repository | Description |
 |---|---|
 | [contracts](https://github.com/multipools/contracts) | Solidity contracts, tests, and Foundry scripts |
-| [launchpad](https://github.com/multipools/launchpad) | React web application |
-| [sdk](https://github.com/multipools/sdk) | TypeScript SDK and OpenAPI spec |
-| [scripts](https://github.com/multipools/scripts) | Deployment and operational scripts |
+| [launchpad](https://github.com/multipools/launchpad) | Privated |
+| [sdk](https://github.com/multipools/sdk) | Privated |
+| [scripts](https://github.com/multipools/scripts) | Privated |
 | [docs](https://github.com/multipools/docs) | This repository |
